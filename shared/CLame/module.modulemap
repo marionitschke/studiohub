@@ -1,0 +1,5 @@
+// LAME's encoder API for Swift. The static library itself is passed to the linker by build.sh.
+module CLame [system] {
+    header "shim.h"
+    export *
+}

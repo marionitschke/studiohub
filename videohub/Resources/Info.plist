@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>VideoHub</string>
+	<key>CFBundleDisplayName</key>
+	<string>VideoHub</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.videohub</string>
+	<key>CFBundleExecutable</key>
+	<string>VideoHub</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.5</string>
+	<key>CFBundleVersion</key>
+	<string>5</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>de</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>de</string>
+	</array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Video</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.apple.quicktime-movie</string>
+				<string>public.mpeg-4</string>
+				<string>com.apple.m4v-video</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Videos kürzen und schneiden, mit Übergängen, Titeln und Logo.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>VideoHub öffnet deine Videos und speichert die geschnittenen Fassungen.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>VideoHub öffnet deine Videos und speichert die geschnittenen Fassungen.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>VideoHub öffnet deine Videos und speichert die geschnittenen Fassungen.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>VideoHub öffnet deine Videos und speichert die geschnittenen Fassungen.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>VideoHub öffnet deine Videos und speichert die geschnittenen Fassungen.</string>
+</dict>
+</plist>
