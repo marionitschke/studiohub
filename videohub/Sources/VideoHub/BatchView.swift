@@ -328,7 +328,7 @@ private struct BatchPreview: View {
         .overlay(alignment: .topLeading) {
             if batch.preview != nil, let item = batch.selectedItem, item.getsWatermark == false {
                 Label(item.watermarkChoice == false ? "Ohne Wasserzeichen (von Hand gewählt)" : "Hat schon ein Logo – kein Wasserzeichen",
-                      systemImage: "seal")
+                      systemImage: "checkmark.seal")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 8)
@@ -364,29 +364,29 @@ private struct BatchList: View {
                     .truncationMode(.middle)
                     .help(item.source.lastPathComponent)
             }
-            .width(min: 160, ideal: 280)
+            .width(min: 140, ideal: 210)
             TableColumn("Titel") { item in
                 Text(item.title.replacingOccurrences(of: "\n", with: " · "))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(item.title)
             }
-            .width(min: 140, ideal: 260)
+            .width(min: 140, ideal: 240)
             TableColumn("Länge") { item in
                 Text(item.duration.map { TimeFormat.string($0, decimals: 0) } ?? "")
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .help(item.summary ?? "")
             }
-            .width(min: 50, ideal: 64, max: 80)
+            .width(min: 44, ideal: 52, max: 80)
             TableColumn("Wasserzeichen") { item in
                 WatermarkCell(item: item)
             }
-            .width(min: 90, ideal: 120, max: 160)
+            .width(min: 90, ideal: 118, max: 160)
             TableColumn("Status") { item in
                 StatusCell(status: item.status)
             }
-            .width(min: 150, ideal: 220)
+            .width(min: 140, ideal: 200)
         }
         .alternatingRowBackgrounds(.disabled)
         .scrollContentBackground(.hidden)
@@ -431,7 +431,7 @@ private struct WatermarkCell: View {
             if item.watermarkChoice == false {
                 Text("Nein (von Hand)").foregroundStyle(.secondary)
             } else {
-                Label("Hat schon eins", systemImage: "seal")
+                Label("Hat schon eins", systemImage: "checkmark.seal")
                     .foregroundStyle(.secondary)
                     .help("Links unten ist schon ein Logo im Video – es kommt keins dazu. Ändern per Rechtsklick.")
             }
