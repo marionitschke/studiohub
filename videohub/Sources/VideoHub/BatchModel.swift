@@ -48,7 +48,9 @@ final class BatchModel {
     var selection: URL? {
         didSet { if selection != oldValue { loadPreview() } }
     }
+    /// Reading lengths and formats.
     private(set) var isScanning = false
+    private(set) var isCheckingLogos = false
     private(set) var isRunning = false
     private(set) var preview: NSImage?
     private(set) var previewTime: Double?
@@ -60,6 +62,7 @@ final class BatchModel {
     private(set) var secondsDone = 0.0
 
     @ObservationIgnored private var scanTask: Task<Void, Never>?
+    @ObservationIgnored private var logoTask: Task<Void, Never>?
     @ObservationIgnored private var runTask: Task<Void, Never>?
     @ObservationIgnored private var previewTask: Task<Void, Never>?
     @ObservationIgnored private var activity: NSObjectProtocol?
@@ -125,6 +128,7 @@ final class BatchModel {
     func scan() {
         guard let source, !isRunning else { return }
         scanTask?.cancel()
+        stopCheckingLogos()
         let urls: [URL]
         do {
             urls = try BatchRecipe.videos(in: source)
@@ -159,17 +163,45 @@ final class BatchModel {
                     items[index].status = .unreadable(problem)
                 }
             }
-            // Then the corners, so that the list shows early which videos get the watermark.
+            guard !Task.isCancelled else { return }
+            isScanning = false
+            checkLogos()
+        }
+    }
+
+    /// Checks the corners of the videos not checked yet, so that the list shows early which videos
+    /// get the watermark. Not while a run exports: decoding for the check at the same time made the
+    /// spare frames of the export pile up (thousands of IOSurfaces) and may let it stand still. The
+    /// run checks each video just before it instead.
+    private func checkLogos() {
+        stopCheckingLogos()
+        guard !isRunning else { return }
+        let urls = items.filter { item in
+            if case .unreadable = item.status { return false }
+            return item.hasLogo == nil
+        }.map(\.id)
+        guard !urls.isEmpty else { return }
+        isCheckingLogos = true
+        logoTask = Task {
             for url in urls {
                 guard !Task.isCancelled else { return }
-                guard let item = items.first(where: { $0.id == url }), item.hasLogo == nil else { continue }
-                if case .unreadable = item.status { continue }
+                guard items.first(where: { $0.id == url })?.hasLogo == nil else { continue }
                 let found = await BurnedInLogo.hasLogo(url)
                 guard !Task.isCancelled else { return }
                 store(found, for: url)
             }
-            isScanning = false
+            isCheckingLogos = false
         }
+    }
+
+    /// The stopped check may still be reading a frame; `start()` waits for it.
+    @discardableResult
+    private func stopCheckingLogos() -> Task<Void, Never>? {
+        let task = logoTask
+        task?.cancel()
+        logoTask = nil
+        isCheckingLogos = false
+        return task
     }
 
     private func store(_ hasLogo: Bool?, for id: URL) {
@@ -262,7 +294,7 @@ final class BatchModel {
                 let document = try await VideoDocument.open(item.source)
                 let frame = try await BatchRecipe.previewFrame(document)
                 guard !Task.isCancelled else { return }
-                if item.hasLogo == nil, let score = try? await BurnedInLogo.detect(document) {
+                if item.hasLogo == nil, !isRunning, let score = try? await BurnedInLogo.detect(document) {
                     guard !Task.isCancelled else { return }
                     store(score.hasLogo, for: item.id)
                 }
@@ -294,7 +326,15 @@ final class BatchModel {
 
     // MARK: Run
 
-    var waitingItems: [BatchItem] { items.filter { $0.status == .waiting || $0.status == .cancelled } }
+    /// Waiting, and the videos a new start tries again.
+    var waitingItems: [BatchItem] {
+        items.filter {
+            switch $0.status {
+            case .waiting, .cancelled, .failed: true
+            default: false
+            }
+        }
+    }
 
     /// Why the batch cannot start yet; nil when it can.
     var startProblem: String? {
@@ -312,7 +352,12 @@ final class BatchModel {
     func start() {
         guard !isRunning, startProblem == nil else { return }
         refreshDestinations()
-        for index in items.indices where items[index].status == .cancelled { items[index].status = .waiting }
+        for index in items.indices {
+            switch items[index].status {
+            case .cancelled, .failed: items[index].status = .waiting
+            default: break
+            }
+        }
         isRunning = true
         finishedMessage = nil
         startedAt = Date()
@@ -320,7 +365,9 @@ final class BatchModel {
         activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
                                                          reason: "VideoHub bearbeitet Videos im Stapel")
         let settings = self.settings
+        let check = stopCheckingLogos()
         runTask = Task {
+            await check?.value
             var done = 0, failed = 0
             for index in items.indices {
                 guard !Task.isCancelled else { break }
@@ -385,6 +432,7 @@ final class BatchModel {
         finishedMessage = (cancelled ? "Abgebrochen: " : "Fertig: ") + parts.joined(separator: ", ") + "."
         onRunEnded?()
         onRunEnded = nil
+        checkLogos()
     }
 
     /// Stops before a video that would not fit: the result needs about the size of the source.

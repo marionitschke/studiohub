@@ -1,6 +1,6 @@
 // Batch checks: titles from file names, loudness measurement (EBU R128) and limiter, file names in
 // the destination folder, and a whole batch run on a generated video (fades, title, watermark,
-// normalised sound, preview the same as the export, cancelling).
+// normalised sound, preview the same as the export, cancelling) and the watchdog for runs that stand still.
 import AppKit
 import AVFoundation
 import Foundation
@@ -201,6 +201,74 @@ extension Checks {
         let tail = centred[72_000...]
         near(Double(tail.reduce(0, +)) / Double(tail.count), 0, 0.002, "an offset (DC) is removed")
         near(Double(peak(centred, from: 1.5)), 0.1, 0.003, "the sound itself stays when an offset is removed")
+    }
+
+    // MARK: Watchdog
+
+    final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.withLock { value = true } }
+        var isSet: Bool { lock.withLock { value } }
+    }
+
+    static func batchWatchdog() async throws {
+        step = "batch: watchdog"
+        let limit: Duration = .milliseconds(300), clock = ContinuousClock()
+
+        let cancelled = Flag()
+        let start = clock.now
+        do {
+            _ = try await BatchProcessor.watched(limit: limit) { moved in
+                moved(0.1)
+                do {
+                    try await Task.sleep(for: .seconds(10))
+                } catch {
+                    cancelled.set()
+                    throw error
+                }
+                return 1
+            }
+            check(false, "batch: a run that stands still is given up")
+        } catch ExportError.stalled(let given) {
+            equal(given, limit, "batch: the error names the time it stood still")
+        }
+        let waited = clock.now - start
+        check(waited >= limit && waited < .seconds(3), "batch: it is given up soon after the limit", "\(waited)")
+        check(cancelled.isSet, "batch: a run that is given up is cancelled")
+
+        let steady = try await BatchProcessor.watched(limit: limit) { moved in
+            for index in 1...10 {
+                moved(Double(index) / 10)
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            return 42
+        }
+        equal(steady, 42, "batch: a run that moves on finishes, however long it takes")
+
+        do {
+            _ = try await BatchProcessor.watched(limit: limit) { moved in
+                for _ in 1...20 {
+                    moved(0.5)
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                return 0
+            }
+            check(false, "batch: progress that does not change counts as standing still")
+        } catch ExportError.stalled {}
+
+        let outer = Task {
+            try await BatchProcessor.watched(limit: .seconds(60)) { _ in
+                try await Task.sleep(for: .seconds(10))
+                return 0
+            }
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        outer.cancel()
+        switch await outer.result {
+        case .success: check(false, "batch: cancelling the batch cancels the watched run")
+        case .failure(let error): check(error is CancellationError, "batch: cancelling the batch is no stall", "\(error)")
+        }
     }
 
     // MARK: A batch run

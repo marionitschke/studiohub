@@ -49,6 +49,7 @@ enum Checks {
             try batchFiles(root)
             try await videos(root)
             try await batchExports(root)
+            try await batchWatchdog()
         } catch {
             check(false, "video checks ran through (last step: \(step))", "\(error)")
         }

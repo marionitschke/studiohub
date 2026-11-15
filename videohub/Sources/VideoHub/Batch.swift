@@ -189,9 +189,59 @@ enum BatchProcessor {
 
     /// The share of the progress the two sound passes take (the encoding takes far longer).
     static let soundShare = 0.1
+    /// A video whose progress stands still this long is given up (see `watched`).
+    static let stallLimit: Duration = .seconds(120)
 
     static func process(_ source: URL, title: String, watermark: Bool = true, to destination: URL, settings: BatchSettings,
                         progress: @escaping @Sendable (Phase, Double) -> Void) async throws -> SoundNormalizer.Result? {
+        try await watched(limit: stallLimit) { moved in
+            try await run(source, title: title, watermark: watermark, to: destination, settings: settings) { phase, value in
+                moved(value)
+                progress(phase, value)
+            }
+        }
+    }
+
+    /// Runs `operation` and cancels it when the progress it reports through `moved` has not changed
+    /// for `limit`. Twice in a batch of 224 videos an export stood still for good (the cause is
+    /// not known); this way it costs one video and not the rest of the night.
+    static func watched<T: Sendable>(limit: Duration,
+                                     _ operation: @escaping @Sendable (_ moved: @escaping @Sendable (Double) -> Void) async throws -> T)
+        async throws -> T {
+        let heartbeat = Heartbeat()
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation { heartbeat.beat($0) } }
+            group.addTask {
+                while true {
+                    try await Task.sleep(for: min(.seconds(1), limit / 4))
+                    if heartbeat.idle > limit { throw ExportError.stalled(limit) }
+                }
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw CancellationError() }
+            return result
+        }
+    }
+
+    /// When the progress last changed.
+    private final class Heartbeat: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = -1.0
+        private var changed = ContinuousClock.now
+
+        func beat(_ value: Double) {
+            lock.withLock {
+                guard value != self.value else { return }
+                self.value = value
+                changed = .now
+            }
+        }
+
+        var idle: Duration { lock.withLock { ContinuousClock.now - changed } }
+    }
+
+    private static func run(_ source: URL, title: String, watermark: Bool, to destination: URL, settings: BatchSettings,
+                            progress: @escaping @Sendable (Phase, Double) -> Void) async throws -> SoundNormalizer.Result? {
         let document = try await VideoDocument.open(source)
         let edit = BatchRecipe.edit(for: document, title: title, settings: settings, watermark: watermark)
         let soundFile = Exporter.temporaryURL(for: destination.deletingPathExtension().appendingPathExtension("m4a"))

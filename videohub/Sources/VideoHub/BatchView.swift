@@ -519,10 +519,10 @@ private struct BatchFooter: View {
                     .buttonStyle(.link)
             }
             Spacer(minLength: 12)
-            if batch.isScanning {
+            if batch.isScanning || batch.isCheckingLogos {
                 ProgressView()
                     .controlSize(.small)
-                    .help("Die Videos werden gelesen und auf ein vorhandenes Logo geprüft")
+                    .help(batch.isScanning ? "Die Videos werden gelesen" : "Die Videos werden auf ein vorhandenes Logo geprüft")
             }
         }
         .padding(.horizontal, 12)
@@ -537,7 +537,12 @@ private struct BatchFooter: View {
         if total > 0 { parts.append(Self.duration(total)) }
         if batch.isRunning {
             let finished = items.filter { if case .done = $0.status { true } else { false } }.count
-            let open = batch.waitingItems.count + items.filter { if case .running = $0.status { true } else { false } }.count
+            let open = items.filter {
+                switch $0.status {
+                case .waiting, .running: true
+                default: false
+                }
+            }.count
             parts = ["\(finished) fertig, \(open) offen"]
             if let left = batch.remainingSeconds { parts.append("noch etwa \(Self.duration(left))") }
         } else {

@@ -29,6 +29,7 @@ final class EffectRenderer: @unchecked Sendable {
     private var content: EffectContent
     private var titleImages: [TitleArt.Key: CIImage] = [:]
     private var logoImage: (key: LogoKey, image: CIImage?)?
+    private var pool: CVPixelBufferPool?
 
     private struct LogoKey: Equatable {
         var file: URL
@@ -37,6 +38,8 @@ final class EffectRenderer: @unchecked Sendable {
 
     static let context = CIContext(options: [.cacheIntermediates: false])
     static let outputColorSpace = CGColorSpace(name: CGColorSpace.itur_709) ?? CGColorSpaceCreateDeviceRGB()
+    /// Frames of the result the encoder may still hold before the renderer waits (see `outputBuffer`).
+    static let framesInFlight = 32
 
     init(document: VideoDocument, content: EffectContent) {
         renderSize = Self.renderSize(of: document)
@@ -71,7 +74,7 @@ final class EffectRenderer: @unchecked Sendable {
     }
 
     func render(_ request: AVAsynchronousVideoCompositionRequest, _ instruction: EffectInstruction) throws -> CVPixelBuffer {
-        guard let output = request.renderContext.newPixelBuffer() else { throw ExportError.failed("Kein Bildpuffer frei.") }
+        guard let output = outputBuffer(request) else { throw ExportError.failed("Kein Bildpuffer frei.") }
         let time = request.compositionTime
         let position = CMTimeConvertScale(time, timescale: timescale, method: .roundHalfAwayFromZero).value
         let canvas = CGRect(origin: .zero, size: renderSize)
@@ -90,6 +93,45 @@ final class EffectRenderer: @unchecked Sendable {
         Self.context.render(image.composited(over: black).cropped(to: canvas), to: output, bounds: canvas,
                             colorSpace: Self.outputColorSpace)
         return output
+    }
+
+    /// A frame for the result, from a pool of the renderer's own. The render context's pool grew to
+    /// thousands of frames while small videos were encoded (2.6 GB at 356 × 266) and once hit the
+    /// limit of 16384 IOSurfaces per process, which failed the export; the own pool stays at a few
+    /// dozen. Past `framesInFlight` it waits up to a second, then falls back to the render context.
+    private func outputBuffer(_ request: AVAsynchronousVideoCompositionRequest) -> CVPixelBuffer? {
+        if request.renderContext.size == renderSize, let pool = outputPool() {
+            let limit = [kCVPixelBufferPoolAllocationThresholdKey as String: Self.framesInFlight] as CFDictionary
+            let deadline = Date().addingTimeInterval(1)
+            repeat {
+                var buffer: CVPixelBuffer?
+                let status = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(nil, pool, limit, &buffer)
+                if status == kCVReturnSuccess, let buffer { return buffer }
+                guard status == kCVReturnWouldExceedAllocationThreshold else { break }
+                usleep(1000)
+            } while Date() < deadline
+        }
+        return request.renderContext.newPixelBuffer()
+    }
+
+    private func outputPool() -> CVPixelBufferPool? {
+        lock.withLock {
+            if pool == nil {
+                let attributes: [String: Any] = [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                    kCVPixelBufferWidthKey as String: Int(renderSize.width),
+                    kCVPixelBufferHeightKey as String: Int(renderSize.height),
+                    kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+                    kCVBufferPropagatedAttachmentsKey as String: [
+                        kCVImageBufferColorPrimariesKey as String: kCVImageBufferColorPrimaries_ITU_R_709_2,
+                        kCVImageBufferTransferFunctionKey as String: kCVImageBufferTransferFunction_ITU_R_709_2,
+                        kCVImageBufferYCbCrMatrixKey as String: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                    ],
+                ]
+                CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &pool)
+            }
+            return pool
+        }
     }
 
     /// Titles and logo on a picture of `renderSize`, darkened for fades: what the export draws over
