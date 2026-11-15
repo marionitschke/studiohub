@@ -3,11 +3,14 @@ import ImageIO
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    @Environment(BatchModel.self) private var batch
     @Environment(\.undoManager) private var undoManager
 
     var body: some View {
         Group {
-            if let document = model.document {
+            if model.tab == .batch {
+                BatchView()
+            } else if let document = model.document {
                 EditorView(document: document)
             } else if model.isOpening {
                 ProgressView("Video wird geöffnet …")
@@ -17,34 +20,39 @@ struct ContentView: View {
             }
         }
         .navigationTitle("VideoHub")
-        .navigationSubtitle(model.document.map { "\($0.url.lastPathComponent) · \($0.summary)" } ?? "")
+        .navigationSubtitle(subtitle)
         .toolbar {
-            ToolbarItem {
-                Button("Öffnen", systemImage: "folder") { model.showOpenPanel() }
-                    .help("Video öffnen (⌘O)")
-                    .disabled(model.isExporting)
+            ToolbarItem(placement: .principal) {
+                TabStrip(selection: Binding(get: { model.tab }, set: { model.show($0) }))
             }
-            ToolbarItem {
-                Menu {
-                    ForEach(AudioFormat.allCases, id: \.self) { format in
-                        Button("Als \(format.title) …") { model.exportAudio(format) }
-                    }
-                } label: {
-                    Label("Ton exportieren", systemImage: "waveform")
+            if model.tab == .edit {
+                ToolbarItem {
+                    Button("Öffnen", systemImage: "folder") { model.showOpenPanel() }
+                        .help("Video öffnen (⌘O)")
+                        .disabled(model.isExporting)
                 }
-                .help("Den Ton des Schnitts als eigene Datei speichern")
-                .disabled(!model.canExportAudio)
-            }
-            ToolbarItem {
-                Button("Video exportieren", systemImage: "square.and.arrow.up") { model.exportVideo() }
-                    .help(model.exportReencodes
-                          ? "Den Schnitt mit seinen Effekten als neues Video speichern – neu kodiert, SDR (⌘E)"
-                          : "Den Schnitt als neues Video speichern – ohne Neukodierung, in Originalqualität (⌘E)")
-                    .disabled(!model.canExport)
+                ToolbarItem {
+                    Menu {
+                        ForEach(AudioFormat.allCases, id: \.self) { format in
+                            Button("Als \(format.title) …") { model.exportAudio(format) }
+                        }
+                    } label: {
+                        Label("Ton exportieren", systemImage: "waveform")
+                    }
+                    .help("Den Ton des Schnitts als eigene Datei speichern")
+                    .disabled(!model.canExportAudio)
+                }
+                ToolbarItem {
+                    Button("Video exportieren", systemImage: "square.and.arrow.up") { model.exportVideo() }
+                        .help(model.exportReencodes
+                              ? "Den Schnitt mit seinen Effekten als neues Video speichern – neu kodiert, SDR (⌘E)"
+                              : "Den Schnitt als neues Video speichern – ohne Neukodierung, in Originalqualität (⌘E)")
+                        .disabled(!model.canExport)
+                }
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            guard !urls.isEmpty, !model.isExporting else { return false }
+            guard model.tab == .edit, !urls.isEmpty, !model.isExporting else { return false }
             // After the drop has finished: opening may ask first.
             DispatchQueue.main.async { model.open(urls) }
             return true
@@ -63,6 +71,21 @@ struct ContentView: View {
             Button("OK") { model.errorMessage = nil }
         } message: {
             Text(model.errorMessage ?? "")
+        }
+        .alert(
+            "Das hat nicht geklappt",
+            isPresented: Binding(get: { batch.errorMessage != nil }, set: { if !$0 { batch.errorMessage = nil } })
+        ) {
+            Button("OK") { batch.errorMessage = nil }
+        } message: {
+            Text(batch.errorMessage ?? "")
+        }
+    }
+
+    private var subtitle: String {
+        switch model.tab {
+        case .edit: model.document.map { "\($0.url.lastPathComponent) · \($0.summary)" } ?? ""
+        case .batch: batch.source?.lastPathComponent ?? ""
         }
     }
 }

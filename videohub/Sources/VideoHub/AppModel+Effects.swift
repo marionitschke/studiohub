@@ -297,17 +297,19 @@ enum LogoStore {
         return support.appendingPathComponent("VideoHub/Logos", isDirectory: true)
     }
 
-    /// Copies an image as PNG (upright, at most 2000 pixels wide) and returns the copy.
-    static func importImage(_ url: URL) throws -> URL {
+    /// Copies an image as PNG (upright, at most 2000 pixels wide) and returns the copy. `trimmed`:
+    /// without its transparent border, so that a margin counts from what is visible.
+    static func importImage(_ url: URL, trimmed: Bool = false) throws -> URL {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: 2000,
         ]
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+              var image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             throw LogoError.unreadable(url.lastPathComponent)
         }
+        if trimmed, let box = visibleBox(of: image), let cropped = image.cropping(to: box) { image = cropped }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let copy = folder.appendingPathComponent("\(UUID().uuidString).png")
         guard let destination = CGImageDestinationCreateWithURL(copy as CFURL, UTType.png.identifier as CFString, 1, nil) else {
@@ -316,6 +318,27 @@ enum LogoStore {
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { throw LogoError.unreadable(url.lastPathComponent) }
         return copy
+    }
+
+    /// The smallest rectangle around all pixels that are not (nearly) transparent; nil when there is nothing to cut.
+    static func visibleBox(of image: CGImage) -> CGRect? {
+        let width = image.width, height = image.height
+        guard width > 0, height > 0, image.alphaInfo != .none, image.alphaInfo != .noneSkipLast, image.alphaInfo != .noneSkipFirst,
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue),
+              let data = context.data else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let alpha = data.bindMemory(to: UInt8.self, capacity: width * height)
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        for y in 0..<height {
+            for x in 0..<width where alpha[y * width + x] > 8 {
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY, maxX - minX + 1 < width || maxY - minY + 1 < height else { return nil }
+        // Rows of the bitmap context start at the top, like the image's own coordinates for `cropping(to:)`.
+        return CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
     }
 
     static func remember(_ logo: Logo) {
@@ -347,9 +370,9 @@ enum LogoStore {
 
     /// Deletes the copies of earlier logos (at launch, when no undo step can need them any more).
     static func cleanUp() {
-        let kept = UserDefaults.standard.string(forKey: fileKey)
+        let kept = [UserDefaults.standard.string(forKey: fileKey), BatchSettings.rememberedWatermark]
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-        for file in files where file.path != kept {
+        for file in files where !kept.contains(file.path) {
             try? FileManager.default.removeItem(at: file)
         }
     }

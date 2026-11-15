@@ -1,7 +1,8 @@
 // VideoHub checks (scripts/check.sh): edit list, detached and muted sound, opening videos, the
 // composition, export without re-encoding (frame-accurate cuts between keyframes, moved parts, sound
 // in sync or shifted, rotation, recording date and metadata, MP4 or MOV, ProRes only in MOV), sound
-// export as M4A, WAV and MP3, waveform. Test videos are generated; works only in temporary folders.
+// export as M4A, WAV and MP3, waveform; the batch in BatchChecks.swift. Test videos are generated;
+// works only in temporary folders.
 import AppKit
 import AVFoundation
 import Foundation
@@ -38,12 +39,16 @@ enum Checks {
         effects()
         exportFormat()
         formatting()
+        batch()
+        loudness()
         let root = temp("video")
         // VIDEOHUB_KEEP=1 keeps the test files for a look with other tools.
         let keep = ProcessInfo.processInfo.environment["VIDEOHUB_KEEP"] == "1"
         do {
             try movieHeader(root)
+            try batchFiles(root)
             try await videos(root)
+            try await batchExports(root)
         } catch {
             check(false, "video checks ran through (last step: \(step))", "\(error)")
         }
@@ -678,9 +683,10 @@ enum Checks {
         func box(_ type: String, _ content: [UInt8]) -> [UInt8] { be(UInt32(8 + content.count)) + Array(type.utf8) + content }
         func be(_ value: UInt32) -> [UInt8] { (0..<4).reversed().map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) } }
         func be64(_ value: UInt64) -> [UInt8] { (0..<8).reversed().map { UInt8(truncatingIfNeeded: value >> UInt64($0 * 8)) } }
-        let mvhd0 = box("mvhd", [0, 0, 0, 0] + be(1234) + be(1234) + be(600) + be(6000) + [UInt8](repeating: 0, count: 80))
-        let mvhd1 = box("mvhd", [1, 0, 0, 0] + be64(5_000_000_000) + be64(5_000_000_000) + be(600) + be64(6000)
-                        + [UInt8](repeating: 0, count: 80))
+        // Typed parts: untyped array literals in one long sum take the type checker many seconds.
+        let start0: [UInt8] = [0, 0, 0, 0], start1: [UInt8] = [1, 0, 0, 0], rest = [UInt8](repeating: 0, count: 80)
+        let mvhd0 = box("mvhd", start0 + be(1234) + be(1234) + be(600) + be(6000) + rest)
+        let mvhd1 = box("mvhd", start1 + be64(5_000_000_000) + be64(5_000_000_000) + be(600) + be64(6000) + rest)
         let ftyp = box("ftyp", Array("qt  ".utf8) + be(0))
         // mdat with a 64-bit size (size field 1), 32 bytes in all.
         let mdat64 = be(1) + Array("mdat".utf8) + be64(32) + [UInt8](repeating: 0xAB, count: 16)
@@ -998,7 +1004,7 @@ enum Checks {
             CVPixelBufferLockBaseAddress(buffer, [])
             let base = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
             let row = CVPixelBufferGetBytesPerRow(buffer)
-            let coarse = UInt8(frame / 16 * 16), fine = UInt8(frame % 16 * 16)
+            let coarse = UInt8(frame / 16 % 16 * 16), fine = UInt8(frame % 16 * 16)
             for y in 0..<height {
                 for x in 0..<width {
                     let value = x < width / 2 ? coarse : fine

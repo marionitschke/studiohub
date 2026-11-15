@@ -111,6 +111,10 @@ struct Title: Identifiable, Hashable, Sendable {
     var dark = false
     /// A half-transparent box behind the text.
     var bar = false
+    /// How long the title fades in and out (at most a quarter of its length).
+    var fadeSeconds = 0.3
+    /// The lines after the first one in this size (relative to `size`).
+    var secondLineScale = 1.0
 
     static let minimumSize = 0.03, maximumSize = 0.2
 }

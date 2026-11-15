@@ -74,10 +74,20 @@ enum Exporter {
     /// Writes an edit with transitions, titles or a logo: the picture is rendered and encoded anew
     /// as H.264 or HEVC, in SDR (HDR is tone-mapped), in the size and frame rate of the source; the
     /// sound is encoded as AAC. MP4 and MOV both work, also for ProRes sources.
-    static func exportEffects(_ document: VideoDocument, edit: EditList, codec: VideoCodec, to destination: URL,
+    /// `sound`: a file whose sound replaces that of the edit (the batch's normalised sound).
+    static func exportEffects(_ document: VideoDocument, edit: EditList, codec: VideoCodec, sound: URL? = nil, to destination: URL,
                               progress: @escaping @Sendable (Double) -> Void) async throws {
         try check(destination, against: document)
-        let effects = try Composer.effects(document, edit: edit)
+        var replacement: Composer.ReplacementSound?
+        // A track holds its asset only weakly: the export fails (−12780) if the asset goes first.
+        let soundAsset = sound.map { AVURLAsset(url: $0, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]) }
+        if let soundAsset {
+            guard let track = try await soundAsset.loadTracks(withMediaType: .audio).first else {
+                throw ExportError.failed("Der bearbeitete Ton lässt sich nicht lesen.")
+            }
+            replacement = Composer.ReplacementSound(track: track, timeRange: try await track.load(.timeRange))
+        }
+        let effects = try Composer.effects(document, edit: edit, sound: replacement)
         guard let session = AVAssetExportSession(asset: effects.composition, presetName: codec.preset) else {
             throw ExportError.failed("Das Video lässt sich nicht als \(codec == .hevc ? "HEVC" : "H.264") kodieren.")
         }
@@ -85,6 +95,7 @@ enum Exporter {
         session.audioMix = effects.audioMix
         session.metadata = (try? await document.asset.load(.metadata)) ?? []
         try await run(session, as: VideoDocument.fileType(for: destination), to: destination, source: document.url, progress: progress)
+        withExtendedLifetime(soundAsset) {}
     }
 
     /// Writes the sound of the edit, decoded and encoded anew: AAC 256 kbit/s, WAV 16 bit or MP3
@@ -156,9 +167,10 @@ enum Exporter {
         }
     }
 
-    /// Decodes the sound (mixed to at most two channels) and writes it as AAC, WAV (16 bit) or MP3.
-    private static func encode(_ asset: AVComposition, mix: AVAudioMix?, sampleRate: Double, channels: Int, format: AudioFormat,
-                               to url: URL, token: CancelToken, progress: (Double) -> Void) async throws {
+    /// Decodes the sound of an asset as 32-bit float PCM (not interleaved, mixed to `channels`) and hands
+    /// it over buffer by buffer. Values beyond ±1 stay as they are (overdriven AAC decodes to them).
+    static func readPCM(_ asset: AVAsset, mix: AVAudioMix? = nil, sampleRate: Double, channels: Int, token: CancelToken,
+                        progress: (Double) -> Void, _ body: (AVAudioPCMBuffer) throws -> Void) async throws {
         let tracks = try await asset.loadTracks(withMediaType: .audio)
         guard !tracks.isEmpty else { throw ExportError.failed("Das Video hat keinen Ton.") }
         let duration = try await asset.load(.duration)
@@ -178,6 +190,31 @@ enum Exporter {
         guard let pcm = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
                                       channels: AVAudioChannelCount(channels), interleaved: false) else { throw ExportError.encoder }
 
+        let total = max(1, duration.seconds * sampleRate)
+        var done = 0.0
+        let gate = PercentGate()
+        while let sample = output.copyNextSampleBuffer() {
+            if token.isCancelled {
+                reader.cancelReading()
+                throw CancellationError()
+            }
+            let frames = CMSampleBufferGetNumSamples(sample)
+            guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: pcm, frameCapacity: AVAudioFrameCount(frames)) else { continue }
+            buffer.frameLength = AVAudioFrameCount(frames)
+            let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(sample, at: 0, frameCount: Int32(frames),
+                                                                      into: buffer.mutableAudioBufferList)
+            guard status == noErr else { throw ExportError.failed("Der Ton lässt sich nicht lesen (Fehler \(status)).") }
+            try body(buffer)
+            done += Double(frames)
+            let value = min(1, done / total)
+            if gate.pass(value) { progress(value) }
+        }
+        if reader.status == .failed { throw reader.error ?? ExportError.failed("Der Ton lässt sich nicht lesen.") }
+    }
+
+    /// Decodes the sound (mixed to at most two channels) and writes it as AAC, WAV (16 bit) or MP3.
+    private static func encode(_ asset: AVComposition, mix: AVAudioMix?, sampleRate: Double, channels: Int, format: AudioFormat,
+                               to url: URL, token: CancelToken, progress: (Double) -> Void) async throws {
         var file: AVAudioFile?
         var mp3: MP3Encoder?
         var handle: FileHandle?
@@ -210,29 +247,12 @@ enum Exporter {
             try? handle?.close()
         }
 
-        let total = max(1, duration.seconds * sampleRate)
-        var done = 0.0
-        let gate = PercentGate()
-        while let sample = output.copyNextSampleBuffer() {
-            if token.isCancelled {
-                reader.cancelReading()
-                throw CancellationError()
-            }
-            let frames = CMSampleBufferGetNumSamples(sample)
-            guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: pcm, frameCapacity: AVAudioFrameCount(frames)) else { continue }
-            buffer.frameLength = AVAudioFrameCount(frames)
-            let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(sample, at: 0, frameCount: Int32(frames),
-                                                                      into: buffer.mutableAudioBufferList)
-            guard status == noErr else { throw ExportError.failed("Der Ton lässt sich nicht lesen (Fehler \(status)).") }
+        try await readPCM(asset, mix: mix, sampleRate: sampleRate, channels: channels, token: token, progress: progress) { buffer in
             if let file { try file.write(from: buffer) }
             if let mp3, let handle, let data = buffer.floatChannelData {
-                try handle.write(contentsOf: mp3.encode(left: data[0], right: data[channels > 1 ? 1 : 0], count: frames))
+                try handle.write(contentsOf: mp3.encode(left: data[0], right: data[channels > 1 ? 1 : 0], count: Int(buffer.frameLength)))
             }
-            done += Double(frames)
-            let value = min(1, done / total)
-            if gate.pass(value) { progress(value) }
         }
-        if reader.status == .failed { throw reader.error ?? ExportError.failed("Der Ton lässt sich nicht lesen.") }
         if let mp3, let handle {
             try handle.write(contentsOf: mp3.flush())
             let tag = mp3.lameTag()

@@ -42,6 +42,8 @@ final class AppModel {
     var focusTitleText = false
     /// The length for new transitions.
     var transitionSeconds = 0.5
+    /// Cutting one video or the batch; remembered.
+    private(set) var tab = AppTab(rawValue: UserDefaults.standard.string(forKey: AppTab.defaultsKey) ?? "") ?? .edit
 
     @ObservationIgnored weak var undoManager: UndoManager?
     @ObservationIgnored let player = VideoPlayer()
@@ -62,6 +64,16 @@ final class AppModel {
         player.onTime = { [weak self] time in self?.playerMoved(time) }
         player.onEnd = { [weak self] in self?.playbackEnded() }
         LogoStore.cleanUp()
+    }
+
+    func show(_ tab: AppTab) {
+        guard tab != self.tab else { return }
+        if tab != .edit {
+            finishLiveChange()
+            pause()
+        }
+        self.tab = tab
+        UserDefaults.standard.set(tab.rawValue, forKey: AppTab.defaultsKey)
     }
 
     var hasUnexportedChanges: Bool { document != nil && edit.hasEdits && edit != exportedEdit }

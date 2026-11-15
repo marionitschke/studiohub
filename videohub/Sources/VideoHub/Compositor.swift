@@ -39,9 +39,7 @@ final class EffectRenderer: @unchecked Sendable {
     static let outputColorSpace = CGColorSpace(name: CGColorSpace.itur_709) ?? CGColorSpaceCreateDeviceRGB()
 
     init(document: VideoDocument, content: EffectContent) {
-        // Encoders want even sizes.
-        renderSize = CGSize(width: max(2, (document.displaySize.width / 2).rounded() * 2),
-                            height: max(2, (document.displaySize.height / 2).rounded() * 2))
+        renderSize = Self.renderSize(of: document)
         frame = document.frameTicks
         timescale = document.timescale
         orientation = Self.orientation(of: document.transform)
@@ -50,6 +48,12 @@ final class EffectRenderer: @unchecked Sendable {
 
     func update(_ content: EffectContent) {
         lock.withLock { self.content = content }
+    }
+
+    /// The size of the picture as shown, in even numbers (encoders want them).
+    static func renderSize(of document: VideoDocument) -> CGSize {
+        CGSize(width: max(2, (document.displaySize.width / 2).rounded() * 2),
+               height: max(2, (document.displaySize.height / 2).rounded() * 2))
     }
 
     /// The image orientation that turns the stored picture upright, from the track's transform.
@@ -70,7 +74,6 @@ final class EffectRenderer: @unchecked Sendable {
         guard let output = request.renderContext.newPixelBuffer() else { throw ExportError.failed("Kein Bildpuffer frei.") }
         let time = request.compositionTime
         let position = CMTimeConvertScale(time, timescale: timescale, method: .roundHalfAwayFromZero).value
-        let content = lock.withLock { self.content }
         let canvas = CGRect(origin: .zero, size: renderSize)
         let black = CIImage(color: .black).cropped(to: canvas)
 
@@ -83,6 +86,17 @@ final class EffectRenderer: @unchecked Sendable {
                 kCIInputTimeKey: progress,
             ])
         }
+        image = decorate(image, at: position)
+        Self.context.render(image.composited(over: black).cropped(to: canvas), to: output, bounds: canvas,
+                            colorSpace: Self.outputColorSpace)
+        return output
+    }
+
+    /// Titles and logo on a picture of `renderSize`, darkened for fades: what the export draws over
+    /// the frame at a sequence position.
+    func decorate(_ picture: CIImage, at position: Int64) -> CIImage {
+        let content = lock.withLock { self.content }
+        var image = picture
         for placed in content.titles where placed.range.contains(position) {
             let opacity = titleOpacity(placed, at: position)
             guard opacity > 0, let art = titleImage(placed.title) else { continue }
@@ -100,16 +114,16 @@ final class EffectRenderer: @unchecked Sendable {
         }
         let level = EffectLayout(ramps: content.ramps).level(at: position, frame: frame)
         if level < 1 {
-            let value = CGFloat(max(0, level))
+            // Core Image works in linear light; scaling the gamma-encoded picture looks even (a linear
+            // scale jumps to a fifth of the brightness in the first frame of a fade in).
+            let value = CGFloat(pow(max(0, level), 2.2))
             image = image.applyingFilter("CIColorMatrix", parameters: [
                 "inputRVector": CIVector(x: value, y: 0, z: 0, w: 0),
                 "inputGVector": CIVector(x: 0, y: value, z: 0, w: 0),
                 "inputBVector": CIVector(x: 0, y: 0, z: value, w: 0),
             ])
         }
-        Self.context.render(image.composited(over: black).cropped(to: canvas), to: output, bounds: canvas,
-                            colorSpace: Self.outputColorSpace)
-        return output
+        return image
     }
 
     /// A source frame, upright and filling the picture.
@@ -125,9 +139,9 @@ final class EffectRenderer: @unchecked Sendable {
         return image
     }
 
-    /// Titles fade in and out over 0.3 s (a quarter of a short title).
+    /// Titles fade in and out (over at most a quarter of their length).
     private func titleOpacity(_ placed: PlacedTitle, at position: Int64) -> Double {
-        let fade = Double(min(Int64(0.3 * Double(timescale)), (placed.end - placed.start) / 4))
+        let fade = Double(min(Int64(placed.title.fadeSeconds * Double(timescale)), (placed.end - placed.start) / 4))
         guard fade > 0 else { return 1 }
         return min(1, Double(position - placed.start + frame) / fade, Double(placed.end - position) / fade)
     }
@@ -179,6 +193,7 @@ enum TitleArt {
         var size: Double
         var dark: Bool
         var bar: Bool
+        var secondLineScale: Double
         var canvas: CGSize
 
         init(title: Title, canvas: CGSize) {
@@ -186,6 +201,7 @@ enum TitleArt {
             size = title.size
             dark = title.dark
             bar = title.bar
+            secondLineScale = title.secondLineScale
             self.canvas = canvas
         }
 
@@ -194,6 +210,7 @@ enum TitleArt {
             hasher.combine(size)
             hasher.combine(dark)
             hasher.combine(bar)
+            hasher.combine(secondLineScale)
             hasher.combine(canvas.width)
             hasher.combine(canvas.height)
         }
@@ -221,11 +238,17 @@ enum TitleArt {
             return CTParagraphStyleCreate(&setting, 1)
         }
         let color = CGColor(gray: title.dark ? 0 : 1, alpha: 1)
-        let string = NSAttributedString(string: text, attributes: [
+        let string = NSMutableAttributedString(string: text, attributes: [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,
             NSAttributedString.Key(kCTParagraphStyleAttributeName as String): paragraph,
         ])
+        if title.secondLineScale != 1, let newline = text.firstIndex(of: "\n") {
+            let rest = NSRange(newline..., in: text)
+            let small = CTFontCreateUIFontForLanguage(.emphasizedSystem, fontSize * CGFloat(title.secondLineScale), nil)
+                ?? CTFontCreateWithName("Helvetica-Bold" as CFString, fontSize * CGFloat(title.secondLineScale), nil)
+            string.addAttribute(NSAttributedString.Key(kCTFontAttributeName as String), value: small, range: rest)
+        }
         let framesetter = CTFramesetterCreateWithAttributedString(string)
         let padding = CGSize(width: (fontSize * 0.45).rounded(.up), height: (fontSize * 0.25).rounded(.up))
         let limit = CGSize(width: max(fontSize, canvas.width * 0.92 - 2 * padding.width), height: .greatestFiniteMagnitude)
@@ -334,9 +357,15 @@ extension Composer {
         let renderer: EffectRenderer
     }
 
+    /// Sound from another file that replaces the sound of the edit, from the start of the sequence on.
+    struct ReplacementSound {
+        let track: AVAssetTrack
+        let timeRange: CMTimeRange
+    }
+
     /// The edit with effects: the parts on one or two video tracks (dissolves need both), a custom
     /// compositor for the picture, volume ramps for the fades.
-    static func effects(_ document: VideoDocument, edit: EditList) throws -> Effects {
+    static func effects(_ document: VideoDocument, edit: EditList, sound replacement: ReplacementSound? = nil) throws -> Effects {
         let layout = edit.effectLayout(frame: document.frameTicks)
         let composition = AVMutableComposition()
         var trackIDs: [CMPersistentTrackID] = []
@@ -355,7 +384,12 @@ extension Composer {
             }
             trackIDs.append(track.trackID)
         }
-        let audioTrack = try addSound(to: composition, document, edit.soundSegments)
+        let audioTrack: AVMutableCompositionTrack?
+        if let replacement {
+            audioTrack = try addSound(to: composition, replacement, length: document.time(layout.length))
+        } else {
+            audioTrack = try addSound(to: composition, document, edit.soundSegments)
+        }
 
         let renderer = EffectRenderer(document: document, content: EffectContent(edit: edit, layout: layout))
         var marks: Set<Int64> = [0, layout.length]
@@ -392,6 +426,16 @@ extension Composer {
         videoComposition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
         let mix = audioTrack.flatMap { Composer.audioMix(for: $0, ramps: layout.ramps, document: document) }
         return Effects(composition: composition, videoComposition: videoComposition, audioMix: mix, renderer: renderer)
+    }
+
+    /// A sound track with the replacement sound from time 0, cut at the end of the sequence.
+    private static func addSound(to composition: AVMutableComposition, _ replacement: ReplacementSound, length: CMTime) throws
+        -> AVMutableCompositionTrack? {
+        let duration = CMTimeMinimum(replacement.timeRange.duration, length)
+        guard duration > .zero,
+              let track = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
+        try track.insertTimeRange(CMTimeRange(start: replacement.timeRange.start, duration: duration), of: replacement.track, at: .zero)
+        return track
     }
 
     /// Volume ramps that follow the fades to and from black; nil without fades.

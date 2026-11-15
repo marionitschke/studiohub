@@ -191,7 +191,8 @@ final class VideoDocument: @unchecked Sendable {
             }
         }
         parts.append("\(Int(size.width)) × \(Int(size.height))")
-        parts.append(frameRate.rounded() == frameRate ? "\(Int(frameRate)) fps" : String(format: "%.2f fps", frameRate))
+        // AVFoundation reports 360 frames in 12 s as 30.000002.
+        parts.append(abs(frameRate - frameRate.rounded()) < 0.001 ? "\(Int(frameRate.rounded())) fps" : String(format: "%.2f fps", frameRate))
         if let format, let hdr = hdrName(format) { parts.append(hdr) }
         return parts.joined(separator: " · ")
     }

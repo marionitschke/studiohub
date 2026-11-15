@@ -5,7 +5,7 @@ Three native macOS apps for photos, videos and music, built from one repository 
 | App | What it does |
 | --- | --- |
 | [PhotoHub](photohub/README.md) | Finds duplicate photos, sorts Apple Photos exports into year/month folders, fixes file dates from the capture time, syncs photo folders |
-| [VideoHub](videohub/README.md) | Trims MOV and MP4 videos: cut, reorder, shift or mute the sound, transitions, titles, logo; export without re-encoding where possible |
+| [VideoHub](videohub/README.md) | Trims MOV and MP4 videos: cut, reorder, shift or mute the sound, transitions, titles, logo; export without re-encoding where possible. Batch processing of whole folders: watermark, title from the file name, fades, even loudness |
 | [MusicHub](musichub/README.md) | Cuts long audio recordings into parts on three tracks and exports them as MP3 (320 kbit/s) with tags, chapters and cue sheets |
 
 The apps' interface is in German and always dark: a Darcula look with neutral greys and a grey accent, each app's own color (PhotoHub violet, VideoHub green, MusicHub magenta) marking its primary actions.
