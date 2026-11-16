@@ -207,10 +207,28 @@ final class EffectRenderer: @unchecked Sendable {
         if let source = CGImageSourceCreateWithURL(logo.file as CFURL, nil),
            let art = CGImageSourceCreateImageAtIndex(source, 0, nil), art.width > 0 {
             let scale = logo.width * renderSize.width / CGFloat(art.width)
-            image = CIImage(cgImage: art).transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            if scale < 1, let small = Self.scaled(art, by: scale) {
+                image = CIImage(cgImage: small)
+            } else {
+                image = CIImage(cgImage: art).transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            }
         }
         lock.withLock { logoImage = (key, image) }
         return image
+    }
+
+    /// The image scaled down once, in whole pixels. Scaling the full image in every frame instead
+    /// cost the batch about 40 % more CPU and 70 % more GPU (a 1468 px watermark shown 153 px wide,
+    /// at some 1000 frames a second).
+    static func scaled(_ image: CGImage, by scale: CGFloat) -> CGImage? {
+        let width = max(1, Int((CGFloat(image.width) * scale).rounded()))
+        let height = max(1, Int((CGFloat(image.height) * scale).rounded()))
+        let space = image.colorSpace.flatMap { $0.model == .rgb ? $0 : nil } ?? CGColorSpace(name: CGColorSpace.sRGB)
+        guard let space, let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                                 space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
     }
 
     /// The image with its alpha (and so its colour) scaled.

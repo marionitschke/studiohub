@@ -1,6 +1,7 @@
 // Batch checks: titles from file names, loudness measurement (EBU R128) and limiter, file names in
 // the destination folder, and a whole batch run on a generated video (fades, title, watermark,
-// normalised sound, preview the same as the export, cancelling) and the watchdog for runs that stand still.
+// normalised sound, preview the same as the export, cancelling), the watchdog for runs that stand still
+// and the second try after one, and the logo scaled down once instead of in every frame.
 import AppKit
 import AVFoundation
 import Foundation
@@ -269,6 +270,55 @@ extension Checks {
         case .success: check(false, "batch: cancelling the batch cancels the watched run")
         case .failure(let error): check(error is CancellationError, "batch: cancelling the batch is no stall", "\(error)")
         }
+
+        step = "batch: second try"
+        var calls = 0
+        let second = try await BatchProcessor.retryingStalls(attempts: 2) { () async throws -> Int in
+            calls += 1
+            if calls == 1 { throw ExportError.stalled(limit) }
+            return 7
+        }
+        equal(second, 7, "batch: a video that stood still is started once more")
+        equal(calls, 2, "batch: the second try follows the first")
+        calls = 0
+        do {
+            _ = try await BatchProcessor.retryingStalls(attempts: 2) { () async throws -> Int in
+                calls += 1
+                throw ExportError.stalled(limit)
+            }
+            check(false, "batch: a video that stands still twice fails")
+        } catch ExportError.stalled {}
+        equal(calls, 2, "batch: a video is tried twice in all, not more")
+        calls = 0
+        do {
+            _ = try await BatchProcessor.retryingStalls(attempts: 2) { () async throws -> Int in
+                calls += 1
+                throw ExportError.failed("kaputt")
+            }
+            check(false, "batch: other errors end the video")
+        } catch ExportError.failed {}
+        equal(calls, 1, "batch: other errors are not tried again")
+    }
+
+    /// The logo is scaled down once to whole pixels, keeping its transparency.
+    static func logoScaling() {
+        step = "logo scaled once"
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let context = CGContext(data: nil, width: 1000, height: 500, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return check(false, "logo: context") }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 500, height: 500))
+        guard let small = EffectRenderer.scaled(context.makeImage()!, by: 0.153) else { return check(false, "logo: scaled") }
+        equal([small.width, small.height], [153, 77], "logo: scaled to whole pixels")
+        var pixels = [UInt8](repeating: 0, count: small.width * small.height * 4)
+        pixels.withUnsafeMutableBytes { buffer in
+            let reader = CGContext(data: buffer.baseAddress, width: small.width, height: small.height, bitsPerComponent: 8,
+                                   bytesPerRow: small.width * 4, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            reader?.draw(small, in: CGRect(x: 0, y: 0, width: small.width, height: small.height))
+        }
+        func alpha(_ x: Int) -> UInt8 { pixels[(small.height / 2 * small.width + x) * 4 + 3] }
+        check(alpha(20) == 255 && pixels[(small.height / 2 * small.width + 20) * 4] == 255, "logo: the opaque half stays white")
+        check(alpha(130) == 0, "logo: the transparent half stays transparent", "\(alpha(130))")
     }
 
     // MARK: A batch run
@@ -320,7 +370,8 @@ extension Checks {
 
         step = "batch: run"
         let logo = folder.appendingPathComponent("Wasserzeichen.png")
-        try writeLogo(logo)
+        // Ten times the size it is shown at, like real watermarks: the renderer scales it down once.
+        try writeLogo(logo, width: 400, height: 200)
         var settings = BatchSettings()
         settings.watermark = logo
         let destination = BatchRecipe.destinations(for: [source], in: output, format: settings.format)[0]

@@ -12,7 +12,7 @@ enum ExportError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .stalled(let limit):
-            "Die Bearbeitung kam \(limit.components.seconds >= 120 ? "\(limit.components.seconds / 60) Minuten" : "\(limit.components.seconds) Sekunden") lang nicht voran und wurde abgebrochen. Ein neuer Start versucht es noch einmal."
+            "Die Bearbeitung kam auch im zweiten Versuch \(limit.components.seconds >= 120 ? "\(limit.components.seconds / 60) Minuten" : "\(limit.components.seconds) Sekunden") lang nicht voran und wurde abgebrochen. Ein neuer Start versucht es noch einmal."
         case .encoder: "Der MP3-Encoder konnte nicht gestartet werden."
         case .overwritesSource: "Die Originaldatei kann nicht überschrieben werden. Bitte wähle einen anderen Namen oder Ordner."
         case .notMP4: "Dieses Video passt ohne Neukodierung nicht in eine MP4-Datei. Bitte wähle beim Exportieren das Format MOV."

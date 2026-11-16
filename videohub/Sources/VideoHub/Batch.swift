@@ -189,22 +189,41 @@ enum BatchProcessor {
 
     /// The share of the progress the two sound passes take (the encoding takes far longer).
     static let soundShare = 0.1
-    /// A video whose progress stands still this long is given up (see `watched`).
+    /// A video whose progress stands still this long is given up (see `watched`) and started again,
+    /// up to `stallAttempts` times in all.
     static let stallLimit: Duration = .seconds(120)
+    static let stallAttempts = 2
 
     static func process(_ source: URL, title: String, watermark: Bool = true, to destination: URL, settings: BatchSettings,
                         progress: @escaping @Sendable (Phase, Double) -> Void) async throws -> SoundNormalizer.Result? {
-        try await watched(limit: stallLimit) { moved in
-            try await run(source, title: title, watermark: watermark, to: destination, settings: settings) { phase, value in
-                moved(value)
-                progress(phase, value)
+        try await retryingStalls(attempts: stallAttempts) {
+            try await watched(limit: stallLimit) { moved in
+                try await run(source, title: title, watermark: watermark, to: destination, settings: settings) { phase, value in
+                    moved(value)
+                    progress(phase, value)
+                }
+            }
+        }
+    }
+
+    /// Runs `operation` again when it stood still (`ExportError.stalled`), up to `attempts` times in
+    /// all; any other error ends it at once.
+    static func retryingStalls<T>(attempts: Int, _ operation: () async throws -> T) async throws -> T {
+        var attempt = 1
+        while true {
+            do {
+                return try await operation()
+            } catch ExportError.stalled where attempt < attempts {
+                try Task.checkCancellation()
+                attempt += 1
             }
         }
     }
 
     /// Runs `operation` and cancels it when the progress it reports through `moved` has not changed
-    /// for `limit`. Twice in a batch of 224 videos an export stood still for good (the cause is
-    /// not known); this way it costs one video and not the rest of the night.
+    /// for `limit`. An export can stand still for good inside AVFoundation, all its threads waiting
+    /// on each other, when another process decodes video at the same time (seen with the logo check
+    /// and with macOS's mediaanalysisd); this way it costs a second try and not the rest of the night.
     static func watched<T: Sendable>(limit: Duration,
                                      _ operation: @escaping @Sendable (_ moved: @escaping @Sendable (Double) -> Void) async throws -> T)
         async throws -> T {

@@ -40,6 +40,7 @@ enum Checks {
         exportFormat()
         formatting()
         batch()
+        logoScaling()
         loudness()
         let root = temp("video")
         // VIDEOHUB_KEEP=1 keeps the test files for a look with other tools.
@@ -857,15 +858,15 @@ enum Checks {
               "\(name): the video is marked as SDR (Rec. 709)", "\(primaries ?? "–") \(transfer ?? "–")")
     }
 
-    /// A white box of 40 × 20 pixels.
-    static func writeLogo(_ url: URL) throws {
-        guard let context = CGContext(data: nil, width: 40, height: 20, bitsPerComponent: 8, bytesPerRow: 0,
+    /// A white box, 40 × 20 pixels unless said otherwise.
+    static func writeLogo(_ url: URL, width: Int = 40, height: Int = 20) throws {
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
               let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
             throw ExportError.failed("logo")
         }
         context.setFillColor(CGColor(gray: 1, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: 40, height: 20))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         CGImageDestinationAddImage(destination, context.makeImage()!, nil)
         guard CGImageDestinationFinalize(destination) else { throw ExportError.failed("logo") }
     }
