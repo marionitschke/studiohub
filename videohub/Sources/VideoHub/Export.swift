@@ -46,6 +46,8 @@ enum VideoCodec: String, CaseIterable, Sendable {
         }
     }
 
+    var name: String { self == .hevc ? "HEVC" : "H.264" }
+
     var preset: String {
         switch self {
         case .h264: AVAssetExportPresetHighestQuality
@@ -54,6 +56,16 @@ enum VideoCodec: String, CaseIterable, Sendable {
     }
 
     static let defaultsKey = "videoCodec"
+}
+
+/// How strongly a video is compressed when it is encoded anew.
+enum VideoQuality: String, CaseIterable, Sendable {
+    /// The encoder's highest quality; without effects the video is copied as it is.
+    case highest
+    /// Size and frame rate as before, a much lower bit rate (see `CompactExport`): for WhatsApp and Instagram.
+    case compact
+
+    static let defaultsKey = "videoQuality"
 }
 
 enum Exporter {
@@ -77,10 +89,11 @@ enum Exporter {
 
     /// Writes an edit with transitions, titles or a logo: the picture is rendered and encoded anew
     /// as H.264 or HEVC, in SDR (HDR is tone-mapped), in the size and frame rate of the source; the
-    /// sound is encoded as AAC. MP4 and MOV both work, also for ProRes sources.
+    /// sound is encoded as AAC. MP4 and MOV both work, also for ProRes sources. `.compact` encodes
+    /// with a much lower bit rate, also edits without effects.
     /// `sound`: a file whose sound replaces that of the edit (the batch's normalised sound).
-    static func exportEffects(_ document: VideoDocument, edit: EditList, codec: VideoCodec, sound: URL? = nil, to destination: URL,
-                              progress: @escaping @Sendable (Double) -> Void) async throws {
+    static func exportEffects(_ document: VideoDocument, edit: EditList, codec: VideoCodec, quality: VideoQuality = .highest,
+                              sound: URL? = nil, to destination: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
         try check(destination, against: document)
         var replacement: Composer.ReplacementSound?
         // A track holds its asset only weakly: the export fails (−12780) if the asset goes first.
@@ -92,13 +105,22 @@ enum Exporter {
             replacement = Composer.ReplacementSound(track: track, timeRange: try await track.load(.timeRange))
         }
         let effects = try Composer.effects(document, edit: edit, sound: replacement)
-        guard let session = AVAssetExportSession(asset: effects.composition, presetName: codec.preset) else {
-            throw ExportError.failed("Das Video lässt sich nicht als \(codec == .hevc ? "HEVC" : "H.264") kodieren.")
+        let metadata = (try? await document.asset.load(.metadata)) ?? []
+        let fileType = VideoDocument.fileType(for: destination)
+        if quality == .compact {
+            try await write(to: destination, source: document.url) { temp in
+                try await CompactExport.write(effects, document: document, codec: codec, metadata: metadata, as: fileType, to: temp,
+                                              progress: progress)
+            }
+        } else {
+            guard let session = AVAssetExportSession(asset: effects.composition, presetName: codec.preset) else {
+                throw ExportError.failed("Das Video lässt sich nicht als \(codec.name) kodieren.")
+            }
+            session.videoComposition = effects.videoComposition
+            session.audioMix = effects.audioMix
+            session.metadata = metadata
+            try await run(session, as: fileType, to: destination, source: document.url, progress: progress)
         }
-        session.videoComposition = effects.videoComposition
-        session.audioMix = effects.audioMix
-        session.metadata = (try? await document.asset.load(.metadata)) ?? []
-        try await run(session, as: VideoDocument.fileType(for: destination), to: destination, source: document.url, progress: progress)
         withExtendedLifetime(soundAsset) {}
     }
 
@@ -152,15 +174,23 @@ enum Exporter {
 
     private static func run(_ session: AVAssetExportSession, as fileType: AVFileType, to destination: URL, source: URL,
                             progress: @escaping @Sendable (Double) -> Void) async throws {
-        let temp = temporaryURL(for: destination)
         let monitor = Task {
             for await state in session.states(updateInterval: 0.1) {
                 if case .exporting(let value) = state { progress(value.fractionCompleted) }
             }
         }
         defer { monitor.cancel() }
-        do {
+        try await write(to: destination, source: source) { temp in
             try await session.export(to: temp, as: fileType)
+        }
+    }
+
+    /// Lets `body` write a hidden file next to the destination, gives it the recording time of the
+    /// source and moves it into place.
+    private static func write(to destination: URL, source: URL, _ body: (URL) async throws -> Void) async throws {
+        let temp = temporaryURL(for: destination)
+        do {
+            try await body(temp)
             if let created = try? MovieHeader.creationTime(of: source), created > 0 {
                 try? MovieHeader.setCreationTime(created, of: temp)
             }

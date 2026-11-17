@@ -14,12 +14,13 @@ struct BatchSettings: Equatable, Sendable {
     var watermarkOpacity = 0.7
     var format = VideoFormat.mp4
     var codec = VideoCodec.h264
+    var quality = VideoQuality.highest
 
     static let sizeRange = 0.05...0.6
     static let opacityRange = 0.1...1.0
 
     private static let watermarkKey = "batchWatermark", sizeKey = "batchWatermarkSize", opacityKey = "batchWatermarkOpacity",
-                       formatKey = "batchFormat", codecKey = "batchCodec"
+                       formatKey = "batchFormat", codecKey = "batchCodec", qualityKey = "batchQuality"
 
     static func load() -> BatchSettings {
         let defaults = UserDefaults.standard
@@ -35,6 +36,7 @@ struct BatchSettings: Equatable, Sendable {
         }
         settings.format = defaults.string(forKey: formatKey).flatMap(VideoFormat.init(rawValue:)) ?? .mp4
         settings.codec = defaults.string(forKey: codecKey).flatMap(VideoCodec.init(rawValue:)) ?? .h264
+        settings.quality = defaults.string(forKey: qualityKey).flatMap(VideoQuality.init(rawValue:)) ?? .highest
         return settings
     }
 
@@ -45,6 +47,7 @@ struct BatchSettings: Equatable, Sendable {
         defaults.set(watermarkOpacity, forKey: Self.opacityKey)
         defaults.set(format.rawValue, forKey: Self.formatKey)
         defaults.set(codec.rawValue, forKey: Self.codecKey)
+        defaults.set(quality.rawValue, forKey: Self.qualityKey)
     }
 
     /// The watermark file to keep when old logo copies are cleaned up.
@@ -272,8 +275,10 @@ enum BatchProcessor {
             token.cancel()
         }
         try Task.checkCancellation()
-        try await Exporter.exportEffects(document, edit: edit, codec: settings.codec, sound: sound == nil ? nil : soundFile,
-                                         to: destination) { progress(.video, soundShare + $0 * (1 - soundShare)) }
+        try await Exporter.exportEffects(document, edit: edit, codec: settings.codec, quality: settings.quality,
+                                         sound: sound == nil ? nil : soundFile, to: destination) {
+            progress(.video, soundShare + $0 * (1 - soundShare))
+        }
         return sound
     }
 }

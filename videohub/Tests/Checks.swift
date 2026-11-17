@@ -38,6 +38,7 @@ enum Checks {
         sound()
         effects()
         exportFormat()
+        compactRates()
         formatting()
         batch()
         logoScaling()
@@ -505,6 +506,7 @@ enum Checks {
         }
 
         try await effectExports(root, document)
+        try await compactExports(root, document)
         try await hardening(root, document)
 
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix(".") }
@@ -676,6 +678,165 @@ enum Checks {
         }
     }
 
+    // MARK: Compact export
+
+    static func compactRates() {
+        let fullHD = CGSize(width: 1920, height: 1080)
+        equal(CompactExport.videoBitRate(size: fullHD, frameRate: 30, codec: .h264), 4_500_000, "compact: 4.5 Mbit/s for 1080p30 in H.264")
+        equal(CompactExport.videoBitRate(size: fullHD, frameRate: 30, codec: .hevc), 2_925_000, "compact: HEVC takes two thirds")
+        let sd = CompactExport.videoBitRate(size: CGSize(width: 640, height: 480), frameRate: 25, codec: .h264)
+        check(sd > 800_000 && sd < 1_200_000, "compact: about 1 Mbit/s for SD", "\(sd)")
+        let uhd = CompactExport.videoBitRate(size: CGSize(width: 3840, height: 2160), frameRate: 30, codec: .h264)
+        check(uhd > 9_000_000 && uhd < 18_000_000, "compact: 4K gets more, but less per pixel", "\(uhd)")
+        let fast = CompactExport.videoBitRate(size: fullHD, frameRate: 60, codec: .h264)
+        check(fast > 4_500_000 && fast < 9_000_000, "compact: 60 fps gets more, but less per frame", "\(fast)")
+        equal(CompactExport.videoBitRate(size: fullHD, frameRate: 30, codec: .h264, sourceBitRate: 2_000_000), 2_000_000,
+              "compact: never more than the source")
+        equal(CompactExport.videoBitRate(size: CGSize(width: 16, height: 16), frameRate: 30, codec: .hevc), 250_000,
+              "compact: a floor for tiny pictures")
+        equal(CompactExport.audioSampleRate(44_100), 44_100, "compact: 44.1 kHz stays")
+        equal(CompactExport.audioSampleRate(96_000), 48_000, "compact: at most 48 kHz")
+        equal(CompactExport.audioSampleRate(30_000), 32_000, "compact: an odd rate goes up to one AAC knows")
+    }
+
+    /// Encoding for WhatsApp and Instagram: everything the effects export does, with a bit rate of its own.
+    static func compactExports(_ root: URL, _ document: VideoDocument) async throws {
+        let t = document.ticks(seconds:)
+        step = "compact: fades"
+        var faded = EditList(bounds: document.bounds, parts: [
+            Part(start: t(6.2), end: t(7.6), transition: Transition(kind: .dissolve, duration: t(0.5))),
+            Part(start: t(1.0), end: t(2.5), transition: Transition(kind: .black, duration: t(0.4))),
+        ])
+        faded.fadeOut = t(0.5)
+        let fadedURL = root.appendingPathComponent("Klein mit Blenden.mov")
+        try await Exporter.exportEffects(document, edit: faded, codec: .h264, quality: .compact, to: fadedURL) { _ in }
+        let fadedDocument = try await VideoDocument.open(fadedURL)
+        check(fadedDocument.summary.hasPrefix("H.264 · 320 × 180 · 30 fps"), "compact: H.264 in the size and rate of the source",
+              fadedDocument.summary)
+        near(fadedDocument.seconds(fadedDocument.bounds.upperBound), 2.9, 0.001, "compact: the length stays")
+        try await checkSDR(fadedURL, "compact")
+        try await checkRecordingTime(fadedURL, "compact")
+        try await checkMetadata(fadedURL, iPhoneMetadata, "compact")
+        let numbers = try await frameNumbers(fadedURL)
+        let pictures = try await grayPictures(fadedURL)
+        equal(pictures.count, 87, "compact: every frame is there")
+        if pictures.count == 87, numbers.count == 87 {
+            check(pictures[0].maximum() < 12, "compact: the first frame of the fade in is black", "\(pictures[0].maximum())")
+            equal(Array(numbers[14..<36]), Array(200..<222), "compact: after the fade in the frames are the right ones")
+            equal(Array(numbers[48..<72]), Array(36..<60), "compact: after the dip the frames are the right ones")
+            check(pictures[86].maximum() < 12, "compact: the last frame of the fade out is black", "\(pictures[86].maximum())")
+        }
+        let sound = try await samples(of: fadedURL)
+        let loud = rms(sound, from: 0.83, to: 0.87)
+        check(loud > 0.2, "compact: a beep outside the fades is as loud as before", "\(loud)")
+        check(rms(sound, from: 1.43, to: 1.47) < loud * 0.4, "compact: the sound fades in with the picture after the dip")
+        let audio = try await AVURLAsset(url: fadedURL).loadTracks(withMediaType: .audio)
+        if let format = try await audio.first?.load(.formatDescriptions).first {
+            equal(CMFormatDescriptionGetMediaSubType(format), kAudioFormatMPEG4AAC, "compact: the sound is AAC")
+        } else {
+            check(false, "compact: the video has its sound")
+        }
+
+        // The cuts of the passthrough check, without effects: encoded anew only because of the bit rate.
+        step = "compact: cuts without effects into an MP4"
+        let cut = EditList(bounds: document.bounds, parts: [Part(start: t(6.2), end: t(7.6)), Part(start: t(1.0), end: t(2.5))])
+        check(!cut.hasEffects, "compact: the plain cuts have no effects")
+        let cutURL = root.appendingPathComponent("Klein.mp4")
+        let gate = PercentGate(), steps = Counter()
+        try await Exporter.exportEffects(document, edit: cut, codec: .hevc, quality: .compact, to: cutURL) { value in
+            if gate.pass(value) { steps.add() }
+        }
+        check(steps.value >= 10, "compact: the progress is reported", "\(steps.value)")
+        let copies = try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.contains(".sb-") }
+        equal(copies, [], "compact: the writer's copy for moving the index is gone right away")
+        equal(try await frameNumbers(cutURL), Array(186..<228) + Array(30..<75), "compact: exactly the frames of both parts")
+        let cutDocument = try await VideoDocument.open(cutURL)
+        check(cutDocument.summary.hasPrefix("HEVC · 320 × 180 · 30 fps"), "compact: HEVC on request", cutDocument.summary)
+        near(cutDocument.seconds(cutDocument.bounds.upperBound), 2.9, 0.001, "compact: length of the edit")
+        try await checkRecordingTime(cutURL, "compact MP4")
+        try await checkCommonMetadata(cutURL, [(.commonKeyCreationDate, "2026-05-01T14:30:00+0200"),
+                                               (.commonKeyLocation, "+52.5163+013.3777+034.000/")], "compact MP4")
+        let cutSound = try await samples(of: cutURL)
+        for at in [0.8, 1.4, 2.4] {
+            check(rms(cutSound, from: at + 0.03, to: at + 0.07) > 0.2, "compact: beep at \(at) s, in sync with the picture")
+        }
+        for at in [0.5, 1.2, 2.0, 2.7] {
+            check(rms(cutSound, from: at, to: at + 0.08) < 0.02, "compact: quiet at \(at) s")
+        }
+        let boxes = try topLevelBoxes(cutURL)
+        check((boxes.firstIndex(of: "moov") ?? .max) < (boxes.firstIndex(of: "mdat") ?? .min), "compact: the index comes first",
+              boxes.joined(separator: " "))
+        let rate = try await AVURLAsset(url: cutURL).loadTracks(withMediaType: .video)[0].load(.estimatedDataRate)
+        let target = CompactExport.bitRates(for: document, codec: .hevc).video
+        check(Double(rate) <= Double(target) * 1.3, "compact: the picture keeps to its bit rate", "\(rate) > \(target)")
+
+        step = "compact: without sound"
+        let silentURL = root.appendingPathComponent("Klein stumm (Quelle).mov")
+        try await makeVideo(silentURL, frames: 30, keyInterval: 30, withAudio: false)
+        let silent = try await VideoDocument.open(silentURL)
+        let silentOutput = root.appendingPathComponent("Klein stumm.mov")
+        try await Exporter.exportEffects(silent, edit: EditList(bounds: silent.bounds), codec: .h264, quality: .compact,
+                                         to: silentOutput) { _ in }
+        equal(try await frameNumbers(silentOutput), Array(0..<30), "compact: a video without sound")
+        equal(try await AVURLAsset(url: silentOutput).loadTracks(withMediaType: .audio).count, 0, "… stays without sound")
+
+        step = "compact: cancelled midway"
+        let cancelURL = root.appendingPathComponent("Klein abgebrochen.mov")
+        let box = TaskBox()
+        let task = box.start {
+            try await Exporter.exportEffects(document, edit: EditList(bounds: document.bounds), codec: .h264, quality: .compact,
+                                             to: cancelURL) { value in
+                if value >= 0.05 { box.cancel() }
+            }
+        }
+        let cancelled: Bool
+        do {
+            try await task.value
+            cancelled = false
+        } catch {
+            cancelled = error is CancellationError
+        }
+        check(cancelled, "compact: a cancelled export stops")
+        check(!FileManager.default.fileExists(atPath: cancelURL.path), "compact: a cancelled export leaves no file")
+    }
+
+    /// The types of the top-level boxes of a movie file, in order.
+    static func topLevelBoxes(_ url: URL) throws -> [String] {
+        let data = try Data(contentsOf: url)
+        var types: [String] = [], offset = 0
+        while offset + 8 <= data.count {
+            var size = data[offset..<offset + 4].reduce(0) { $0 << 8 | Int($1) }
+            if size == 1, offset + 16 <= data.count { size = data[offset + 8..<offset + 16].reduce(0) { $0 << 8 | Int($1) } }
+            types.append(String(decoding: data[offset + 4..<offset + 8], as: UTF8.self))
+            guard size >= 8 else { break }
+            offset += size
+        }
+        return types
+    }
+
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func add() { lock.withLock { count += 1 } }
+        var value: Int { lock.withLock { count } }
+    }
+
+    /// A task that its own work can cancel (the lock holds a cancel back until the task is known).
+    final class TaskBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: Task<Void, Error>?
+
+        func start(_ work: @escaping @Sendable () async throws -> Void) -> Task<Void, Error> {
+            lock.withLock {
+                let task = Task { try await work() }
+                self.task = task
+                return task
+            }
+        }
+
+        func cancel() { lock.withLock { task?.cancel() } }
+    }
+
     // MARK: Hardening
 
     /// The movie header patch on hand-made files: 64-bit and open-ended boxes work; anything malformed is
@@ -781,6 +942,9 @@ enum Checks {
         let exports: [(String, @Sendable (URL) async throws -> Void)] = [
             ("Abbruch.mov", { try await Exporter.exportVideo(document, ranges: [document.bounds], to: $0) { _ in } }),
             ("Abbruch mit Blende.mov", { try await Exporter.exportEffects(document, edit: faded, codec: .h264, to: $0) { _ in } }),
+            ("Abbruch klein.mp4", {
+                try await Exporter.exportEffects(document, edit: faded, codec: .h264, quality: .compact, to: $0) { _ in }
+            }),
             ("Abbruch.wav", { try await Exporter.exportAudio(document, ranges: [document.bounds], format: .wav, to: $0) { _ in } }),
         ]
         for (name, export) in exports {

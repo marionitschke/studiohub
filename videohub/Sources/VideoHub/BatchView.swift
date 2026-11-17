@@ -226,6 +226,19 @@ private struct OutputSection: View {
             Text(batch.settings.codec == .h264 ? "H.264 läuft überall, auch auf alten Geräten." : "HEVC: kleinere Dateien, braucht neuere Geräte.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            // A menu: "Komprimiert (Social Media)" is too wide for a segment in this column.
+            Picker("Qualität", selection: Binding(get: { batch.settings.quality }, set: { quality in batch.change { $0.quality = quality } })) {
+                Text("Höchste Qualität").tag(VideoQuality.highest)
+                Text("Komprimiert (Social Media)").tag(VideoQuality.compact)
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
+            Text(batch.settings.quality == .compact
+                 ? "Für WhatsApp, Instagram und Co.: viel kleinere Dateien, Bildgröße und Bildrate bleiben."
+                 : "So gut, wie der Codec kann – große Dateien.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .disabled(batch.isRunning)
     }

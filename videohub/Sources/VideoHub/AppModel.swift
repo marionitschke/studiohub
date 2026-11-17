@@ -573,32 +573,45 @@ final class AppModel {
         finishLiveChange()
         let effects = edit.hasEffects
         let defaults = UserDefaults.standard
-        let mp4Possible = effects || document.copiesIntoMP4
-        let format = VideoFormat.preferred(remembered: defaults.string(forKey: VideoFormat.defaultsKey),
-                                           source: document.url, mp4Possible: mp4Possible)
-        let codec = effects ? VideoCodec(rawValue: defaults.string(forKey: VideoCodec.defaultsKey) ?? "") ?? .h264 : nil
+        let quality = VideoQuality(rawValue: defaults.string(forKey: VideoQuality.defaultsKey) ?? "") ?? .highest
+        let codec = VideoCodec(rawValue: defaults.string(forKey: VideoCodec.defaultsKey) ?? "") ?? .h264
+        let format = VideoFormat.preferred(remembered: defaults.string(forKey: VideoFormat.defaultsKey), source: document.url,
+                                           mp4Possible: effects || quality == .compact || document.copiesIntoMP4)
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "\(document.name) \(edit.hasEdits ? "(gekürzt)" : "(Kopie)").\(format.fileExtension)"
         panel.directoryURL = document.url.deletingLastPathComponent()
-        if effects {
-            let size = document.displaySize
-            let rate = document.frameRate.rounded() == document.frameRate ? "\(Int(document.frameRate))" : String(format: "%.2f", document.frameRate)
-            panel.message = "Mit Übergängen, Titeln oder Logo wird das Video neu kodiert – \(Int(size.width)) × \(Int(size.height)), \(rate) fps, SDR."
-        } else {
-            panel.message = "Das Video wird ohne Neukodierung gespeichert – in Originalqualität."
-        }
         panel.prompt = "Exportieren"
         panel.canCreateDirectories = true
-        let accessory = FormatAccessory(panel: panel, format: format, mp4Possible: mp4Possible, codec: codec)
+        let size = document.displaySize
+        let rate = document.frameRate.rounded() == document.frameRate ? "\(Int(document.frameRate))" : String(format: "%.2f", document.frameRate)
+        let picture = "\(Int(size.width)) × \(Int(size.height)), \(rate) fps, SDR"
+        let seconds = document.seconds(edit.effectLayout(frame: document.frameTicks).length)
+        let whole = document.seconds(document.length)
+        let original = whole > 0 ? Int64(Double(document.fileSize) * min(1, seconds / whole)) : document.fileSize
+        let accessory = FormatAccessory(panel: panel, format: format, effects: effects, copiesIntoMP4: document.copiesIntoMP4,
+                                        quality: quality, codec: codec) { quality, codec in
+            switch quality {
+            case .compact:
+                let compact = CompactExport.estimatedSize(of: document, seconds: seconds, codec: codec)
+                let files = ByteCountFormatter.string(fromByteCount: compact, countStyle: .file)
+                return "Komprimiert für Social Media wie WhatsApp oder Instagram – \(picture), etwa \(files)"
+                    + (compact < original ? " statt \(ByteCountFormatter.string(fromByteCount: original, countStyle: .file))." : ".")
+            case .highest where effects:
+                return "Mit Übergängen, Titeln oder Logo wird das Video neu kodiert – \(picture)."
+            case .highest:
+                return "Das Video wird ohne Neukodierung gespeichert – in Originalqualität."
+            }
+        }
         let answer = withExtendedLifetime(accessory) { panel.runModal() }
         guard answer == .OK, let url = panel.url else { return }
         defaults.set(VideoFormat(of: url).rawValue, forKey: VideoFormat.defaultsKey)
+        defaults.set(accessory.quality.rawValue, forKey: VideoQuality.defaultsKey)
         let snapshot = edit
-        if effects {
-            let chosen = accessory.codec ?? .h264
+        if accessory.reencodes {
+            let chosen = accessory.codec, compression = accessory.quality
             defaults.set(chosen.rawValue, forKey: VideoCodec.defaultsKey)
             run(destination: url, snapshot: snapshot) { progress in
-                try await Exporter.exportEffects(document, edit: snapshot, codec: chosen, to: url, progress: progress)
+                try await Exporter.exportEffects(document, edit: snapshot, codec: chosen, quality: compression, to: url, progress: progress)
             }
         } else {
             let ranges = edit.ranges, sound = edit.soundSegments

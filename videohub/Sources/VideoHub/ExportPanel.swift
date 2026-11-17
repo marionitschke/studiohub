@@ -30,43 +30,56 @@ enum VideoFormat: String, CaseIterable, Sendable {
     static let defaultsKey = "videoFormat"
 }
 
-/// The format popup in the save panel (switching it changes the extension in the name field) and,
-/// when the video is encoded anew, the codec popup.
+/// The popups in the save panel: format (switching it changes the extension in the name field),
+/// quality and codec. The codec counts only when the video is encoded anew – with effects, or
+/// compressed for sharing.
 @MainActor
 final class FormatAccessory: NSObject {
     private let panel: NSSavePanel
-    private let popup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let codecPopup: NSPopUpButton?
+    private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let qualityPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let codecPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let effects: Bool
+    private let copiesIntoMP4: Bool
+    private let message: (VideoQuality, VideoCodec) -> String
 
-    /// The chosen codec; nil when the video is copied without re-encoding.
-    var codec: VideoCodec? {
-        codecPopup.map { VideoCodec.allCases[max(0, $0.indexOfSelectedItem)] }
-    }
+    var quality: VideoQuality { VideoQuality.allCases[max(0, qualityPopup.indexOfSelectedItem)] }
+    var codec: VideoCodec { VideoCodec.allCases[max(0, codecPopup.indexOfSelectedItem)] }
+    /// Whether the video is encoded anew (else it is copied as it is).
+    var reencodes: Bool { effects || quality == .compact }
 
-    init(panel: NSSavePanel, format: VideoFormat, mp4Possible: Bool, codec: VideoCodec? = nil) {
+    /// `copiesIntoMP4`: the source fits in an MP4 without re-encoding. `message`: the panel's text for a choice.
+    init(panel: NSSavePanel, format: VideoFormat, effects: Bool, copiesIntoMP4: Bool, quality: VideoQuality, codec: VideoCodec,
+         message: @escaping (VideoQuality, VideoCodec) -> String) {
         self.panel = panel
-        codecPopup = codec.map { codec in
-            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
-            popup.addItems(withTitles: VideoCodec.allCases.map(\.title))
-            popup.selectItem(at: VideoCodec.allCases.firstIndex(of: codec) ?? 0)
-            return popup
-        }
+        self.effects = effects
+        self.copiesIntoMP4 = copiesIntoMP4
+        self.message = message
         super.init()
-        popup.autoenablesItems = false
-        for option in VideoFormat.allCases {
-            popup.addItem(withTitle: option.title)
-            if option == .mp4, !mp4Possible {
-                popup.lastItem?.isEnabled = false
-                popup.lastItem?.toolTip = "ProRes passt ohne Neukodierung nur in MOV. Mit Effekten geht auch MP4."
+        formatPopup.autoenablesItems = false
+        formatPopup.addItems(withTitles: VideoFormat.allCases.map(\.title))
+        formatPopup.selectItem(at: VideoFormat.allCases.firstIndex(of: format) ?? 0)
+        formatPopup.target = self
+        formatPopup.action = #selector(formatChanged)
+        for option in VideoQuality.allCases {
+            switch option {
+            case .highest: qualityPopup.addItem(withTitle: effects ? "Höchste Qualität" : "Original – ohne Neukodierung")
+            case .compact: qualityPopup.addItem(withTitle: "Komprimiert (Social Media)")
             }
         }
-        popup.selectItem(at: VideoFormat.allCases.firstIndex(of: format) ?? 0)
-        popup.target = self
-        popup.action = #selector(changed)
+        qualityPopup.selectItem(at: VideoQuality.allCases.firstIndex(of: quality) ?? 0)
+        qualityPopup.target = self
+        qualityPopup.action = #selector(choiceChanged)
+        codecPopup.addItems(withTitles: VideoCodec.allCases.map(\.title))
+        codecPopup.selectItem(at: VideoCodec.allCases.firstIndex(of: codec) ?? 0)
+        codecPopup.target = self
+        codecPopup.action = #selector(choiceChanged)
 
-        var rows: [[NSView]] = [[NSTextField(labelWithString: "Format:"), popup]]
-        if let codecPopup { rows.append([NSTextField(labelWithString: "Codec:"), codecPopup]) }
-        let grid = NSGridView(views: rows)
+        let grid = NSGridView(views: [
+            [NSTextField(labelWithString: "Format:"), formatPopup],
+            [NSTextField(labelWithString: "Qualität:"), qualityPopup],
+            [NSTextField(labelWithString: "Codec:"), codecPopup],
+        ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
         grid.columnSpacing = 8
@@ -82,11 +95,33 @@ final class FormatAccessory: NSObject {
         ])
         container.frame = NSRect(origin: .zero, size: container.fittingSize)
         panel.accessoryView = container
-        apply(format)
+        update()
+        apply(selectedFormat)
     }
 
-    @objc private func changed() {
-        apply(VideoFormat.allCases[max(0, popup.indexOfSelectedItem)])
+    private var selectedFormat: VideoFormat { VideoFormat.allCases[max(0, formatPopup.indexOfSelectedItem)] }
+
+    @objc private func formatChanged() {
+        apply(selectedFormat)
+    }
+
+    @objc private func choiceChanged() {
+        update()
+    }
+
+    /// ProRes fits in an MP4 only when it is encoded anew; the codec matters only then.
+    private func update() {
+        let mp4 = copiesIntoMP4 || reencodes
+        if let item = formatPopup.item(at: VideoFormat.allCases.firstIndex(of: .mp4) ?? 0) {
+            item.isEnabled = mp4
+            item.toolTip = mp4 ? nil : "ProRes passt ohne Neukodierung nur in MOV. Mit Effekten oder komprimiert geht auch MP4."
+        }
+        if !mp4, selectedFormat == .mp4 {
+            formatPopup.selectItem(at: VideoFormat.allCases.firstIndex(of: .mov) ?? 0)
+            apply(.mov)
+        }
+        codecPopup.isEnabled = reencodes
+        panel.message = message(quality, codec)
     }
 
     private func apply(_ format: VideoFormat) {
