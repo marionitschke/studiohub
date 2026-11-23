@@ -38,6 +38,21 @@ use_lame() {
   fi
   FLAGS+=(-I "$SHARED/CLame" -Xcc -I"$LAME_PREFIX/include")
   LAME_LIB="$LAME_PREFIX/lib/libmp3lame.a"
+
+  # LAME 4 decodes with libmpg123, which its static library does not contain: link mpg123's static
+  # library too (into FLAGS, so scripts/check.sh gets it from --print-flags).
+  if nm -u "$LAME_LIB" 2>/dev/null | grep -q '_mpg123_'; then
+    local mpg123_prefix
+    mpg123_prefix="$(brew --prefix mpg123 2>/dev/null || true)"
+    for candidate in "$mpg123_prefix" /opt/homebrew /usr/local; do
+      if [[ -n "$candidate" && -f "$candidate/lib/libmpg123.a" ]]; then
+        FLAGS+=("$candidate/lib/libmpg123.a")
+        return
+      fi
+    done
+    echo "LAME needs mpg123, which was not found. Install it with: brew install mpg123" >&2
+    exit 1
+  fi
 }
 
 # Redraws Resources/AppIcon.icns from scripts/make-icon.swift.

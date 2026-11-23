@@ -394,7 +394,7 @@ final class BatchModel {
                 do {
                     let result = try await BatchProcessor.process(item.source, title: item.title, watermark: watermark, to: item.destination,
                                                                   settings: settings) { phase, value in
-                        Task { @MainActor [weak self] in self?.progress(id, phase, value) }
+                        Task { @MainActor in self.progress(id, phase, value) }
                     }
                     items[index].status = .done(result)
                     done += 1

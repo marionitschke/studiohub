@@ -652,7 +652,7 @@ final class AppModel {
             do {
                 try await work { value in
                     guard gate.pass(value) else { return }
-                    Task { @MainActor [weak self] in self?.exportProgress = value }
+                    Task { @MainActor in self.exportProgress = value }
                 }
                 if let snapshot { exportedEdit = snapshot }
                 exportedFiles = [destination]
